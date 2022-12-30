@@ -1,0 +1,117 @@
+Sidekiq In Rails: Native Worker & ActiveJob, Who’s The Winner?
+Learnings from setting up a cron job in Rails using Sidekiq.
+
+5 MIN READ  |  FEB 22, 2021
+Share: 
+Sidekiq In Rails: Native Worker & ActiveJob, Who’s The Winner?
+By Aya Aurora
+
+Using a framework is convenient until we want to create something not supported by the framework, or something against the framework principle.
+
+Recently, I braced myself and created a cron job with Rails and Sidekiq with an extra feature. In this blog, I shall detail the hits and (multiple) misses that ensued.
+
+The main quest
+The problem that I tried to solve with the cron job is that I wanted to schedule data exporting to Postgres database.
+
+Hmm, sounds easy and straightforward, doesn’t it?
+Unfortunately, this wasn’t the only problem. There were several conditions that needed to be met:
+
+There should be an alerting mechanism if a failure happens while running the job
+The alerting shouldn’t be fired until the job is exhausted from retrying to run itself again
+The job should be scheduled
+Seems like the problem can be solved by Sidekiq itself, right?
+
+I had to integrate the implementation of this problem with Rails app, since there would be an API created to fetch the exported data from Postgres database.
+Before we begin, here’s a little context about the example in this blog:
+
+To mimic and reproduce the challenges I encountered while solving the issue, I’ll showcase how I created a job to export weather data to Postgres db. Apart from that, the version of Sidekiq and rails I used to reproduce the obstacles were 6.1.2 and 6.1.0 respectively.
+
+Attempt #1: ActiveJob and retry_on
+As a newbie in Rails and Sidekiq, I prefer to implement things in the most simple and straightforward way:
+
+Add Sidekiq as Rails queue_adapter
+Configure Sidekiq by adding it to Gemfile and create config/initializers/sidekiq.rb file
+Create docker-compose.yml file to generate redis container
+Once the configuration of Sidekiq is done, I generated an ActiveJob and its spec in rails. Below is the code snippet example of exporting data to Postgres db I created:
+
+
+In the code snippet, I specified retry_on where I can define which exception the job needs to be retried, the number of attempts for the retry, time interval for the retry to occur, the queue and priority for the retry, and random delay of time for calculating backoff.
+
+At first, the job is successfully retrying the job again when the exception raised.
+
+Enqueued ExportWeatherDataJob (Job ID: c7f4f994-0d15-42eb-8bbb-fba23632fb9e) to Sidekiq(default) at 2020-12-15 00:43:44 UTC
+Retrying ExportWeatherDataJob in 3 seconds, due to a RuntimeError.
+=> #<RuntimeError: Unable to fetch weather data>
+BUT.
+
+You guessed it right… It didn’t work as expected. The job didn’t retry as many as the defined attempts, it exceeded it. 😕
+
+
+Attempt #2: ActiveJob and sidekiq_options
+After breaking my head for several minutes, I found that Sidekiq supports ActiveJob to have sidekiq_options and allows the developer to set up the retry attempts since Sidekiq version 6.0.1.
+
+
+However, it didn’t work either. It didn’t retry the job.
+
+-e:1:in `<main>'
+Traceback (most recent call last):
+        2: from (irb):1
+        1: from app/jobs/export_weather_data_job.rb:32:in `perform'
+RuntimeError (Unable to fetch weather data)
+
+Attempt #3: ActiveJob and global max_retries
+I wasn’t ready to give up ActiveJob yet. After removing sidekiq_options in ExportWeatherDataJob class, I added sidekiq.yml and set max retries value as follows:
+
+:max_retries: 3
+And… It worked! 🥳
+
+After retry_count exceeded 2 (meaning the job had retried 3 times), the job was considered dead and remained in DeadSet.
+
+
+
+The BIG drawback: This attempt enables ALL JOBS within Rails retry for only 3 times. 😕
+
+Attempt #4: Sidekiq Worker
+Finally, in the fourth attempt, I decided to utilise Sidekiq worker and discarded ActiveJob.
+
+
+The Sidekiq worker worked like a charm. ✨
+
+After failing to run the job, it created a RetrySet and retried as many as defined attempts as possible. After failing again in the last retry, it created a DeadSet.
+
+
+
+Job Scheduling
+There are several ways to schedule Job in Sidekiq. If you’re using Sidekiq enterprise, you can utilise its feature to set the schedule. If you aren’t, then using Sidekiq scheduling open source library will definitely help you succeed in your quest.
+
+Using sidekiq-cron
+When I was still using ActiveJob, I imported sidekiq-cron gem to manage the job schedule. I only needed to define the schedule as follow in config/initializers/sidekiq.rb
+
+
+The problem is using sidekiq-cron in redis-rb version 4.3 generates the following warning inside sidekiq log.
+
+Redis#exists(key)
+ will return an Integer in redis-rb 4.3. exists? returns a boolean, you should use it instead. To opt-in to the new behavior now you can set Redis.exists_returns_integer =  true. To disable this message and keep the current (boolean) behaviour of 'exists' you can set `Redis.exists_returns_integer = false`, but this option will be removed in 5.0. (/Users/aya.rimbamorani/.rbenv/versions/2.5.0/lib/ruby/gems/2.5.0/gems/sidekiq-cron-1.2.0/lib/sidekiq/cron/job.rb:464:in `block in save')
+At first, the log was fine until I finally needed to debug the code because the job generated an error. It was not easy to find the start and end time log of the job since it was hidden between the warnings.
+
+Sidekiq Enterprise Periodic Jobs
+To use sidekiq enterprise periodic jobs, I added the following code in config/initializers/sidekiq.rb .
+
+
+When I was still using ActiveJob, I tried to use Sidekiq enterprise periodic jobs but it caused an error. As it turns out, Sidekiq enterprise periodic jobs need to find the job ID of the worker. Unfortunately, there is a difference between ActiveJob and Sidekiq Worker revealing their job ID. ActiveJob has provider_job_id instance attribute while Sidekiq Worker is has jid . Well, because of this difference, the schedule failed since it couldn’t find the job ID instance attribute, which is jid in an ActiveJob.
+
+To conclude, there are several ways to set up a cron job with Sidekiq and Rails depending on the problem you want to solve:
+
+👉 If you only need a cron job and not bothered by the retry mechanism, developing a cron job with the first attempt is enough.
+
+👉 If you want to have the same max retry attempts across all jobs, third attempt will do.
+
+👉 If you have the same problem as mine, fourth attempt is the answer.
+
+And oh, thanks to Prajogo Atmaja for helping me troubleshoot the project and revising this blogpost.
+
+References
+Sidekiq, Job Lifecycle, Ruby on Rails, ActiveJob, Sidekiq cron.
+
+
+To read more about how we build our #SuperApp, check out our blogs. Also, we’re hiring!
